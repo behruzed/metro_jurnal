@@ -5,14 +5,16 @@ const ActivityLog = require('../models/ActivityLog');
 const ensureDefaultJournalTypes = async () => {
   const defaultTypes = [
     {
-      name: 'DU-2: Train Maneuvers',
+      name: 'DU-2: Train Acceptance/Dispatch',
       code: 'DU-2',
-      description: 'Poyezdlarning manyovr yozuvlari uchun raqamli jurnal.',
+      description: 'Poyezdlarni qabul qilish va jo‘natishni qayd etish jurnali.',
       fields: [
-        { name: 'route_line', label: 'Yo‘l nomi', type: 'text', required: true },
-        { name: 'from_track', label: 'Boshlangan yo‘l', type: 'text', required: false },
-        { name: 'to_track', label: 'Tugagan yo‘l', type: 'text', required: false },
-        { name: 'maneuver_details', label: 'Manyovr tafsiloti', type: 'textarea', required: true }
+        { name: 'train_number', label: 'Poyezd raqami', type: 'text', required: true },
+        { name: 'action_type', label: 'Harakat turi', type: 'text', required: true }, // Will be filled from modal
+        { name: 'event_time', label: 'Vaqti', type: 'datetime', required: true },
+        { name: 'track_id', label: 'Yo‘l (Rim: I-II, Oddiy: 1-10)', type: 'select', required: true, options: ['I', 'II', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'] },
+        { name: 'route_number', label: 'Marshrut raqami', type: 'text', required: false },
+        { name: 'comment', label: 'Izoh', type: 'textarea', required: false }
       ]
     },
     {
@@ -20,7 +22,29 @@ const ensureDefaultJournalTypes = async () => {
       code: 'DU-5',
       description: 'Tunnelga tushayotgan xodimlar va ularning guvohnoma maʼlumotlari.',
       fields: [
+        { name: 'record_time', label: 'Vaqti (Sana)', type: 'datetime', required: true },
+        { name: 'certificateId', label: 'Guvohnoma raqami', type: 'text', required: true },
+        { name: 'fullName', label: 'F.I.SH', type: 'text', required: true },
+        { name: 'purpose', label: 'Tunelga tushishdan maqsadi', type: 'textarea', required: true },
+        { name: 'assignment', label: 'Naryad (ixtiyoriy)', type: 'text', required: false },
+        { name: 'exit_location', label: 'Chiqish manzili (bekat)', type: 'select', required: true, options: ['Bodomzor', 'Shahriston', 'Yunusobod', 'Turkiston', 'Minor', 'Abdulla Qodiriy', 'Paxtakor', 'Chorsu'] },
         { name: 'notes', label: 'Qoʻshimcha eslatma', type: 'textarea', required: false }
+      ]
+    },
+    {
+      name: 'DU-19: Maneuver Report',
+      code: 'DU-19',
+      description: 'Manyovr operatsiyalarini qayd etish jurnali.',
+      fields: [
+        { name: 'record_time', label: 'Sana va vaqt', type: 'datetime', required: true },
+        { name: 'wagon_count', label: 'Manyovr tarkibidagi vagonlar soni', type: 'number', required: true },
+        { name: 'start_route', label: 'Yo\'l kanava (Boshlanish)', type: 'number', required: true },
+        { name: 'end_route', label: 'Yo\'l kanava (Tugash)', type: 'number', required: true },
+        { name: 'traffic_light', label: 'Svetofor', type: 'text', required: true },
+        { name: 'completion_time', label: 'Amalga oshirilgan vaqti', type: 'datetime', required: true },
+        { name: 'employee_name', label: 'Xodim F.I.Sh', type: 'text', required: true },
+        { name: 'position', label: 'Lavozimi', type: 'text', required: true },
+        { name: 'notes', label: 'Izoh', type: 'textarea', required: false }
       ]
     }
   ];
@@ -29,6 +53,12 @@ const ensureDefaultJournalTypes = async () => {
     const existing = await JournalType.findOne({ code: typeDef.code });
     if (!existing) {
       await JournalType.create(typeDef);
+    } else {
+      // Update existing to ensure fields match new requirements
+      existing.fields = typeDef.fields;
+      existing.name = typeDef.name;
+      existing.description = typeDef.description;
+      await existing.save();
     }
   }
 };
@@ -93,23 +123,61 @@ const getStationEntries = async (req, res) => {
   }
 };
 
-// @desc    Admin: Create a new journal type
-// @route   POST /api/journals/types
-// @access  Admin/Superadmin
-const createJournalType = async (req, res) => {
-  const { name, code, description, fields } = req.body;
+// @desc    Get open DU-5 journal entries for the current station
+// @route   GET /api/journals/entries/open/du5
+// @access  Employee
+const getOpenDU5Entries = async (req, res) => {
+  try {
+    const du5Type = await JournalType.findOne({ code: 'DU-5' });
+    const entries = await JournalEntry.find({ 
+      stationId: req.station._id,
+      journalTypeId: du5Type._id,
+      'data.journal_status': { $ne: 'closed' }
+    })
+      .populate('journalTypeId', 'name code')
+      .populate('createdBy', 'name role')
+      .sort({ createdAt: -1 });
+    
+    res.json(entries);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching open DU-5 entries' });
+  }
+};
+
+// @desc    Close a DU-5 journal entry with exit info
+// @route   PUT /api/journals/entries/:id/close
+// @access  Employee
+const closeDU5Entry = async (req, res) => {
+  const { id } = req.params;
+  const { exit_time, exit_location } = req.body;
 
   try {
-    const journalType = await JournalType.create({
-      name,
-      code,
-      description,
-      fields
+    const entry = await JournalEntry.findById(id);
+    
+    if (!entry) {
+      return res.status(404).json({ message: 'Journal entry not found' });
+    }
+
+    entry.data.journal_status = 'closed';
+    entry.data.exit_time = exit_time;
+    entry.data.exit_location = exit_location;
+    entry.updatedAt = new Date();
+    
+    await entry.save();
+
+    await ActivityLog.create({
+      userId: req.user._id,
+      stationId: req.station._id,
+      actionType: 'close_du5_entry',
+      targetId: entry._id,
+      device: req.deviceId,
+      ipAddress: req.ip
     });
 
-    res.status(201).json(journalType);
+    res.json(entry);
   } catch (error) {
-    res.status(500).json({ message: 'Error creating journal type' });
+    console.error('Error closing journal entry:', error.message);
+    res.status(500).json({ message: 'Error closing journal entry' });
   }
 };
 
@@ -117,5 +185,6 @@ module.exports = {
   getJournalTypes,
   createJournalEntry,
   getStationEntries,
-  createJournalType
+  getOpenDU5Entries,
+  closeDU5Entry
 };

@@ -123,4 +123,16 @@ const employeeLogin = async (req, res) => {
   }
 };
 
-module.exports = { stationLogin, employeeLogin };
+// @desc    Get all active stations
+// @route   GET /api/auth/stations
+// @access  Public or Protected
+const getStations = async (req, res) => {
+  try {
+    const stations = await Station.find({ isActive: true }).select('name department');
+    res.json(stations);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching stations' });
+  }
+};
+
+module.exports = { stationLogin, employeeLogin, getStations };
